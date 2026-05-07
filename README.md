@@ -150,12 +150,12 @@ input from stdin per process) and runs every file under `fuzz/afl/in/` through
 possible leak.
 
 ```sh
-LD_LIBRARY_PATH=$(dirname $(find target/debug/build/libghostty-vt-sys-*/out -name "libghostty-vt*" | head -1)) \
-  fuzz/afl/valgrind.sh
+fuzz/afl/valgrind.sh
 ```
 
-Set `PROFILE=release` to sweep the optimised build and `LOG_DIR=...` to
-redirect logs.
+The script resolves `libghostty-vt` under `target/$PROFILE/build/` and exports
+`LD_LIBRARY_PATH` itself. Set `PROFILE=release` to sweep the optimised build
+and `LOG_DIR=...` to redirect logs.
 
 ### Running the example
 

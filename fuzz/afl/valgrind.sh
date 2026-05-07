@@ -42,6 +42,19 @@ if [ ! -x "$BIN" ]; then
     exit 1
 fi
 
+# The harness dynamically links against libghostty-vt, which the build script
+# emits into target/$PROFILE/build/libghostty-vt-sys-*/out. Without this on
+# LD_LIBRARY_PATH the loader aborts before main() and valgrind reports zero
+# allocations, masking the real issue. Resolve it once here so callers do not
+# have to remember the LD_LIBRARY_PATH dance from the README.
+GHOSTTY_LIB_DIR=$(dirname "$(find "$REPO_ROOT/target/$PROFILE/build" \
+    -name 'libghostty-vt*' -print 2>/dev/null | head -n1)")
+if [ -z "$GHOSTTY_LIB_DIR" ] || [ ! -d "$GHOSTTY_LIB_DIR" ]; then
+    echo "Could not locate libghostty-vt under target/$PROFILE/build" >&2
+    exit 1
+fi
+export LD_LIBRARY_PATH="$GHOSTTY_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
 # `--error-exitcode=1` makes a single leaking input fail CI.
 # `--errors-for-leak-kinds=definite,possible` ignores still-reachable allocations
 # from the Zig allocator's internal caches that are not actionable leaks.
