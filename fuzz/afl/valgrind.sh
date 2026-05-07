@@ -72,14 +72,20 @@ while IFS= read -r -d '' input; do
     rel=$(realpath --relative-to="$CORPUS_DIR" "$input")
     log_file="$LOG_DIR/${rel//\//_}.log"
 
+    # Capture the program's own stderr alongside the valgrind log so any Zig
+    # panic / Rust abort message survives a non-zero exit. valgrind's
+    # --log-file already isolates its commentary from the program output.
+    stderr_file="${log_file%.log}.stderr"
     if valgrind "${VALGRIND_OPTS[@]}" \
         --log-file="$log_file" \
-        "$BIN" <"$input" >/dev/null 2>&1; then
+        "$BIN" <"$input" >/dev/null 2>"$stderr_file"; then
         echo "ok   $rel"
+        # Don't keep empty stderr files around for clean runs.
+        [ -s "$stderr_file" ] || rm -f "$stderr_file"
     else
         failed=$((failed + 1))
         exit_status=1
-        echo "FAIL $rel  ($log_file)"
+        echo "FAIL $rel  ($log_file, stderr: $stderr_file)"
     fi
 done < <(find "$CORPUS_DIR" -type f -print0 | sort -z)
 
