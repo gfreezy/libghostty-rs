@@ -184,6 +184,8 @@
 
               environment.systemPackages = [
                 pkgs.git
+                pkgs.valgrind
+                pkgs.cargo-valgrind
               ];
 
               system.stateVersion = "25.11";
@@ -222,10 +224,17 @@
             pkgs.pkg-config
             pkgs.openssl
             pkgs.cmake
+            pkgs.git
+            pkgs.gnumake
             pkgs.ninja
           ] ++ pkgs.lib.optionals aflplusplusAvailable [
             pkgs.aflplusplus
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+            # Valgrind is Linux-only (broken on aarch64-darwin in nixpkgs).
+            # cargo-valgrind is a thin Cargo subcommand, but only useful when
+            # valgrind itself is available, so gate both together.
+            pkgs.valgrind
+            pkgs.cargo-valgrind
             pkgs.libx11
             pkgs.libxcursor
             pkgs.libxrandr

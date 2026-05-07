@@ -101,6 +101,7 @@ inside Linux:
 
 ```sh
 nix develop
+cargo afl config --build --update
 cargo afl build -p libghostty-vt-afl-fuzz
 
 # Linux
@@ -116,6 +117,7 @@ nix run .#afl-vm
 # Inside the VM:
 cd /work
 nix develop
+cargo afl config --build --update
 cargo afl build -p libghostty-vt-afl-fuzz
 LD_LIBRARY_PATH=$(dirname $(find target/debug/build/libghostty-vt-sys-*/out -name "libghostty-vt*" | head -1)) \
   cargo afl fuzz -i fuzz/afl/in -o fuzz/afl/out target/debug/libghostty-vt-afl-fuzz
@@ -134,6 +136,26 @@ To reproduce a crash, pass the crashing input back through the same binary:
 LD_LIBRARY_PATH=$(dirname $(find target/debug/build/libghostty-vt-sys-*/out -name "libghostty-vt*" | head -1)) \
   cargo afl run target/debug/libghostty-vt-afl-fuzz < fuzz/afl/out/default/crashes/id:000000,...
 ```
+
+### Valgrind sweep over the corpus
+
+`cargo-valgrind` and `valgrind` are wired into the Linux dev shell and the AFL
+VM. They are not installed on macOS because upstream valgrind is broken on
+`aarch64-darwin`. Use the AFL VM (`nix run .#afl-vm`) on macOS hosts.
+
+`fuzz/afl/valgrind.sh` builds the harness in non-fuzzing mode (it consumes one
+input from stdin per process) and runs every file under `fuzz/afl/in/` through
+`valgrind --leak-check=full --track-origins=yes`. Per-input logs land in
+`target/valgrind-fuzz/` and the script exits non-zero on the first definite or
+possible leak.
+
+```sh
+LD_LIBRARY_PATH=$(dirname $(find target/debug/build/libghostty-vt-sys-*/out -name "libghostty-vt*" | head -1)) \
+  fuzz/afl/valgrind.sh
+```
+
+Set `PROFILE=release` to sweep the optimised build and `LOG_DIR=...` to
+redirect logs.
 
 ### Running the example
 
