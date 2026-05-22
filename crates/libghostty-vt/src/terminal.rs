@@ -1153,12 +1153,11 @@ handlers! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::mem::ManuallyDrop;
-    use std::rc::Rc;
 
     #[inline(never)]
-    fn build_terminal(callback_count: Rc<Cell<usize>>) -> Terminal<'static, 'static> {
+    fn build_terminal<'cb>(callback_count: &'cb RefCell<usize>) -> Terminal<'static, 'cb> {
         let mut terminal = Terminal::new(Options {
             cols: 80,
             rows: 24,
@@ -1168,7 +1167,7 @@ mod tests {
 
         terminal
             .on_device_attributes(move |_term| {
-                callback_count.set(callback_count.get() + 1);
+                *callback_count.borrow_mut() += 1;
                 Some(DeviceAttributes {
                     primary: PrimaryDeviceAttributes::new(
                         ConformanceLevel::VT220,
@@ -1227,17 +1226,54 @@ mod tests {
         }
     }
 
+    /// Send an OSC 2 title sequence, then verify `term.title()` returns the
+    /// correct value inside the `on_title_changed` callback.
+    #[test]
+    fn title_changed_callback_returns_correct_title() {
+        // The callback bound on `on_title_changed` is `'cb`, not `'static`,
+        // so the closure can borrow stack locals directly – no Rc needed.
+        let captured_title: RefCell<String> = RefCell::new(String::new());
+        let callback_count: Cell<usize> = Cell::new(0);
+
+        let mut terminal = Terminal::new(Options {
+            cols: 80,
+            rows: 24,
+            max_scrollback: 0,
+        })
+        .expect("terminal should initialize");
+
+        terminal
+            .on_title_changed(|term| {
+                callback_count.set(callback_count.get() + 1);
+                let title = term
+                    .title()
+                    .expect("title() should succeed inside callback");
+                *captured_title.borrow_mut() = title.to_owned();
+            })
+            .expect("callback should register");
+
+        // OSC 2 (set title) should invoke on_title_changed.
+        terminal.vt_write(b"\x1b]2;Hello Effects\x1b\\");
+        assert_eq!(callback_count.get(), 1);
+        assert_eq!(*captured_title.borrow(), "Hello Effects");
+
+        // A second title change should fire the callback again.
+        terminal.vt_write(b"\x1b]2;Second Title\x1b\\");
+        assert_eq!(callback_count.get(), 2);
+        assert_eq!(*captured_title.borrow(), "Second Title");
+    }
+
     /// Explicitly relocate the Terminal into distinct storage, then verify the
     /// callback still fires through the stable VTable userdata pointer.
     #[test]
     fn callbacks_survive_explicit_relocation() {
-        let callback_count = Rc::new(Cell::new(0usize));
-        let terminal = build_terminal(callback_count.clone());
+        let callback_count = RefCell::new(0usize);
+        let terminal = build_terminal(&callback_count);
         let (mut terminal, addr_before, addr_after) = relocate_into_new_box(terminal);
         assert_ne!(addr_before, addr_after);
 
         // Primary DA request (CSI c) should invoke on_device_attributes.
         terminal.vt_write(b"\x1b[c");
-        assert_eq!(callback_count.get(), 1);
+        assert_eq!(*callback_count.borrow(), 1);
     }
 }
