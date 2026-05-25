@@ -66,7 +66,7 @@ fn main() -> Result<()> {
     terminal.vt_write(b"echo");
 
     let echo = Point::Active(PointCoordinate { x: 0, y: 0 });
-    tracked.set_point(&mut terminal, echo)?;
+    tracked.set(&mut terminal, echo)?;
     assert!(
         tracked.has_value(),
         "tracked ref should have a value after set"

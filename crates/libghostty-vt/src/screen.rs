@@ -173,17 +173,6 @@ impl TrackedGridRef {
         Self { inner, terminal }
     }
 
-    fn handle_for_terminal(
-        &self,
-        terminal: &Terminal<'_, '_>,
-    ) -> Result<NonNull<ffi::TrackedGridRefImpl>> {
-        if self.terminal != terminal.inner.ptr {
-            return Err(Error::InvalidValue);
-        }
-
-        Ok(self.inner)
-    }
-
     /// Whether a tracked grid reference currently has a meaningful value.
 	///
 	/// If the terminal that created the tracked reference has been dropped,
@@ -202,10 +191,15 @@ impl TrackedGridRef {
     /// If the tracked reference no longer has a meaningful value, this returns
     /// `Ok(None)`. This includes references whose owning terminal has been dropped.
     pub fn snapshot<'t>(&self, terminal: &'t Terminal<'_, '_>) -> Result<Option<GridRef<'t>>> {
-        let inner = self.handle_for_terminal(terminal)?;
+        // The C ghostty_tracked_grid_ref_snapshot does not take a terminal, so
+        // we validate the pairing here to keep the returned GridRef's lifetime
+        // soundly tied to a terminal that actually owns the underlying pin.
+        if self.terminal != terminal.inner.ptr {
+            return Err(Error::InvalidValue);
+        }
         let mut grid_ref = MaybeUninit::new(ffi::sized!(ffi::GridRef));
         let result = unsafe {
-            ffi::ghostty_tracked_grid_ref_snapshot(inner.as_ptr(), grid_ref.as_mut_ptr())
+            ffi::ghostty_tracked_grid_ref_snapshot(self.inner.as_ptr(), grid_ref.as_mut_ptr())
         };
 
         from_optional_result(result, grid_ref).map(|value| {
@@ -223,7 +217,7 @@ impl TrackedGridRef {
     ///
     /// This is the tracked equivalent of [`Terminal::point_from_grid_ref`].
     /// Unlike snapshotting, this does not expose an intermediate untracked
-  [`GridRef`].
+    /// [`GridRef`].
     ///
     /// A tracked reference is resolved against the terminal screen/page-list 
     /// that currently owns the reference. If the terminal has switched between
@@ -263,9 +257,15 @@ impl TrackedGridRef {
         terminal: &mut Terminal<'_, '_>,
         point: Point,
     ) -> Result<&mut Self> {
-        let inner = self.handle_for_terminal(terminal)?;
+        // The C layer validates the terminal/tracked-ref pairing and returns
+        // GHOSTTY_INVALID_VALUE on mismatch, so we don't duplicate the check
+        // on the Rust side.
         let result = unsafe {
-            ffi::ghostty_tracked_grid_ref_set(inner.as_ptr(), terminal.inner.as_raw(), point.into())
+            ffi::ghostty_tracked_grid_ref_set(
+                self.inner.as_ptr(),
+                terminal.inner.as_raw(),
+                point.into(),
+            )
         };
         from_result(result)?;
         Ok(self)

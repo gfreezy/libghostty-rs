@@ -1434,7 +1434,7 @@ mod tests {
 
         terminal.vt_write(b"echo");
         tracked
-            .set_point(&mut terminal, Point::Active(PointCoordinate { x: 0, y: 0 }))
+            .set(&mut terminal, Point::Active(PointCoordinate { x: 0, y: 0 }))
             .expect("tracked grid ref should set to a new point");
 
         assert!(tracked.has_value());
@@ -1479,7 +1479,7 @@ mod tests {
             Err(Error::InvalidValue)
         ));
         assert!(matches!(
-            tracked.set_point(&mut second, Point::Active(PointCoordinate { x: 0, y: 0 })),
+            tracked.set(&mut second, Point::Active(PointCoordinate { x: 0, y: 0 })),
             Err(Error::InvalidValue)
         ));
     }
