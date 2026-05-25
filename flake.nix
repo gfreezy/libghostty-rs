@@ -82,6 +82,8 @@
 
         commonArgs =
           {
+            pname = "libghostty-rs";
+            version = "0.1.1";
             inherit src;
             strictDeps = true;
             GHOSTTY_SOURCE_DIR = "${ghosttySrc}";
@@ -124,6 +126,8 @@
         );
       in {
         packages.default = application;
+
+        checks.default = application;
 
         devShells.default = craneLib.devShell {
           packages = [
