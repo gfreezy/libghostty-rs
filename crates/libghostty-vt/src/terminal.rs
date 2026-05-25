@@ -265,7 +265,7 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     ///
     /// Each tracked reference adds bookkeeping to terminal mutations. Use
     /// [`Terminal::grid_ref`] for immediate one-shot cell inspection.
-    pub fn track_grid_ref(&mut self, point: Point) -> Result<TrackedGridRef> {
+    pub fn track_grid_ref(&self, point: Point) -> Result<TrackedGridRef> {
         let mut raw: ffi::TrackedGridRef = std::ptr::null_mut();
         let result = unsafe {
             ffi::ghostty_terminal_grid_ref_track(self.inner.as_raw(), point.into(), &raw mut raw)
