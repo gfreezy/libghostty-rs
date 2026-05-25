@@ -70,6 +70,9 @@
 //! terminal emulation thread/task and the main program. Under sufficient load, it is
 //! generally more efficient to offload terminal emulation to its own operating
 //! system-level thread, in order to reduce competition with other business logic.
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/ghostty-org/ghostty/2d0fb81751def478e2f8a5f7e2ee91fa9cbf9bff/images/icons/icon_128@2x.png"
+)]
 #![warn(clippy::pedantic)]
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
