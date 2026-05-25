@@ -103,9 +103,6 @@
                 pkgs.libclang
                 pkgs.openssl
               ]
-              ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
-                pkgs.musl
-              ]
               ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
                 pkgs.apple-sdk
                 pkgs.libiconv
