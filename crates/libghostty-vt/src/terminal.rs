@@ -249,22 +249,21 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         Ok(unsafe { GridRef::from_raw(grid_ref) })
     }
 
-    /// Create an owned grid reference that follows terminal mutations.
+	/// Create an owned tracked grid reference for a terminal point.
     ///
-    /// The returned handle is backed by libghostty's tracked grid ref API and
-    /// follows its resolved cell across terminal mutations that preserve the
-    /// underlying location. It can still lose its semantic location if the
-    /// underlying grid storage is reset or discarded; in that case its
-    /// snapshot and point conversion methods return `Ok(None)`.
-    ///
-    /// The reference is attached to the terminal screen/page-list that is
-    /// active when this method is called. The handle may outlive the terminal;
-    /// after terminal free, tracked-grid-ref APIs that do not produce a
-    /// [`GridRef`] report no value and the handle can still be dropped
-    /// normally.
-    ///
-    /// Each tracked reference adds bookkeeping to terminal mutations. Use
-    /// [`Terminal::grid_ref`] for immediate one-shot cell inspection.
+	/// This is the tracked variant of [`Terminal::grid_ref`]. The returned handle
+	/// follows the referenced cell as the terminal's page list is modified: 
+	/// scrolling, pruning, resize/reflow, and other page-list operations update
+	/// the tracked reference automatically.
+	///
+	/// The reference is attached to the terminal screen/page-list that is
+	/// active at creation time.
+	///
+	/// If the point is outside the requested coordinate space, this returns
+	/// `Err(Error::InvalidValue)`.
+	///
+	/// If the tracked grid reference outlives this terminal, the handle remains
+	/// valid, but it will always return `false` or `Ok(None)`.
     pub fn track_grid_ref(&self, point: Point) -> Result<TrackedGridRef> {
         let mut raw: ffi::TrackedGridRef = std::ptr::null_mut();
         let result = unsafe {
@@ -276,11 +275,21 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         Ok(TrackedGridRef::new(inner, self.inner.ptr))
     }
 
-    /// Convert a grid reference back to a point in the requested space.
-    ///
-    /// Returns `Ok(None)` if the referenced cell cannot be represented in the
-    /// requested coordinate space, such as asking for active-area coordinates
-    /// for a cell that has scrolled into history.
+	/// Convert a grid reference back to a point in the given coordinate system.
+	///
+	/// This is the inverse of [`Terminal::grid_ref`]: given a grid reference, it
+	/// returns the x/y coordinates in the requested coordinate system (active,
+	/// viewport, screen, or history).
+	///
+	/// The grid reference must have been obtained from the same terminal instance.
+	/// Like all grid references, it is only valid until the next mutating
+	/// terminal call.
+	///
+	/// Not every grid reference is representable in every coordinate system.
+	/// For example, a cell in scrollback history cannot be expressed in active
+	/// coordinates, and a cell that has scrolled off the visible area cannot
+	/// be expressed in viewport coordinates. In these cases, the function
+	/// returns `Ok(None)`.
     pub fn point_from_grid_ref(
         &self,
         grid_ref: &GridRef<'_>,
