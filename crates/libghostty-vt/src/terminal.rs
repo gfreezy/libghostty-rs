@@ -22,6 +22,39 @@ pub use ffi::{SizeReportSize, TerminalScrollbar as Scrollbar};
 /// Once a terminal session is up and running, you can configure a key encoder
 /// to write keyboard input via [`key::Encoder::set_options_from_terminal`].
 ///
+/// ## Example: VT stream processing
+///
+/// ```
+/// use libghostty_vt::{Terminal, TerminalOptions};
+///
+/// // Create a terminal
+/// let mut terminal = Terminal::new(TerminalOptions {
+///     cols: 80,
+///     rows: 24,
+///     max_scrollback: 0,
+/// }).unwrap();
+///
+/// // Feed VT data into the terminal
+/// terminal.vt_write(b"Hello, World!\r\n");
+///
+/// // ANSI color codes: ESC[1;32m = bold green, ESC[0m = reset
+/// terminal.vt_write(b"\x1b[1;32mGreen Text\x1b[0m\r\n");
+///
+/// // Cursor positioning: ESC[1;1H = move to row 1, column 1
+/// terminal.vt_write(b"\x1b[1;1HTop-left corner\r\n");
+///
+/// // Cursor movement: ESC[5B = move down 5 lines
+/// terminal.vt_write(b"\x1b[5B");
+/// terminal.vt_write(b"Moved down!\r\n");
+///
+/// // Erase line: ESC[2K = clear entire line
+/// terminal.vt_write(b"\x1b[2K");
+/// terminal.vt_write(b"New content\r\n");
+///
+/// // Multiple lines
+/// terminal.vt_write(b"Line A\r\nLine B\r\nLine C\r\n");
+/// ```
+///
 /// # Effects
 ///
 /// By default, the terminal sequence processing with [`Terminal::vt_write`]
@@ -53,32 +86,45 @@ pub use ffi::{SizeReportSize, TerminalScrollbar as Scrollbar};
 /// due to Rust's much stricter safety guarantees. In turn, we use the
 /// user data internally for callback dispatch purposes.
 ///
-/// You should instead use idiomatic Rust mechanisms like [`Rc`](std::rc::Rc)s
-/// to hold common, mutable state between callbacks (which is perfectly safe,
-/// since everything is run on a single thread within a single `vt_write` call),
-/// or with some other type with interior mutability.
+/// You should instead use types that allow safe *interior mutability*
+/// (e.g. [`Cell`](std::cell::Cell) or [`RefCell`](std::cell::RefCell))
+/// and pass a shared reference into each effect handler that needs to mutate
+/// the shared state. Note that reference counting mechanisms like
+/// [`Rc`](std::rc::Rc) and [`Arc`](std::sync::Arc) are optional.
 ///
 /// ## Example: Registering effects and processing VT data
 ///
 /// ```rust
-/// use std::{cell::Cell, rc::Rc};
+/// use std::cell::Cell;
 /// use libghostty_vt::{Terminal, TerminalOptions};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // Set up a simple bell counter.
+/// //
+/// // `usize` is a simple, `Copy`able type, which means `Cell`s are
+/// // perfectly suitable here. More complex, non-`Copy` types should
+/// // use `RefCell`s instead.
+/// //
+/// // This has to be done before the terminal is created, since
+/// // its effect handlers will continue to refer to the bell counter
+/// // during the lifetime of the terminal.
+/// let bell_count = Cell::new(0usize);
+///
 /// let mut terminal = Terminal::new(TerminalOptions {
 ///     cols: 80,
 ///     rows: 24,
 ///     max_scrollback: 0,
 /// })?;
 ///
-/// // Set up a simple bell counter
-/// let bell_count = Rc::new(Cell::new(0usize));
 /// terminal
 ///     .on_pty_write(|_term, data| {
 ///         println!("Replying {} bytes to the PTY", data.len());
 ///     })?
 ///    .on_bell({
-///        let bell_count = bell_count.clone();
+///        // Explicitly borrow the bell count, or otherwise `move`
+///        // will attempt to capture the entire `Cell` and cause a
+///        // compiler error
+///        let bell_count = &bell_count;
 ///        move |_term| {
 ///            bell_count.update(|v| v + 1);
 ///            println!("Bell! (count = {})", bell_count.get())
@@ -106,6 +152,80 @@ pub use ffi::{SizeReportSize, TerminalScrollbar as Scrollbar};
 /// assert_eq!(bell_count.get(), 2);
 /// # Ok(())}
 /// ```
+///
+/// # Color theme
+///
+/// The terminal maintains a set of colors used for rendering: a foreground
+/// color, a background color, a cursor color, and a 256-color palette. Each
+/// of these has two layers: a **default** value set by the embedder, and an
+/// **override** value that programs running in the terminal can set via OSC
+/// escape sequences (e.g. OSC 10/11/12 for foreground/background/cursor,
+/// OSC 4 for individual palette entries).
+///
+/// ## Default colors
+///
+/// Use [`Terminal::set_default_fg_color`], [`Terminal::set_default_bg_color`],
+/// [`Terminal::set_default_cursor_color`] and [`Terminal::set_default_color_palette`]
+/// to configure the default colors. These represent the theme or configuration
+/// chosen by the embedder. Passing `None` clears the default, leaving the color
+/// unset.
+///
+/// For the palette, passing `None` resets to the built-in default palette.
+/// The palette set operation preserves any per-index OSC overrides that programs
+/// have applied; only unmodified indices are updated.
+///
+/// ## Reading colors
+///
+/// Use functions like [`Terminal::default_cursor_color`],
+/// [`Terminal::bg_color`], [`Terminal::default_color_palette`], etc. to read
+/// colors. There are two variants for each color: the **effective** value
+/// (which returns the OSC override if one is active, otherwise the default)
+/// and the **default** value (which ignores any OSC overrides).
+///
+/// For foreground, background, and cursor colors, the getters return `Ok(None)`
+/// if no color is configured (neither a default nor an OSC override).
+/// The palette getters always succeed since the palette always has a value
+/// (the built-in default if nothing else is set).
+///
+/// ## Setting a color theme
+///
+/// ```
+/// use libghostty_vt::{
+///     style::{RgbColor, PaletteIndex},
+///     Error,
+///     Terminal,
+/// };
+///
+/// fn set_color_theme(terminal: &mut Terminal<'_, '_>) -> Result<(), Error> {
+///     // Set default foreground (light gray) and background (dark)
+///     terminal
+///         .set_default_fg_color(Some(
+///             RgbColor { r: 0xDD, g: 0xDD, b: 0xDD }
+///         ))?
+///         .set_default_bg_color(Some(
+///             RgbColor { r: 0x1E, g: 0x1E, b: 0x2E }
+///         ))?
+///         .set_default_cursor_color(Some(
+///             RgbColor { r: 0xF5, g: 0xE0, b: 0xDC }
+///         ))?;
+///     
+///     // Set a custom palette — start from the built-in default and override
+///     // the first 8 entries with a custom dark theme.
+///     let mut palette = terminal.default_color_palette()?;
+///     palette[PaletteIndex::BLACK.0 as usize]   = RgbColor { r: 0x45, g: 0x47, b: 0x5A };
+///     palette[PaletteIndex::RED.0 as usize]     = RgbColor { r: 0xF3, g: 0x8B, b: 0xA8 };
+///     palette[PaletteIndex::GREEN.0 as usize]   = RgbColor { r: 0xA6, g: 0xE3, b: 0xA1 };
+///     palette[PaletteIndex::YELLOW.0 as usize]  = RgbColor { r: 0xF9, g: 0xE2, b: 0xAF };
+///     palette[PaletteIndex::BLUE.0 as usize]    = RgbColor { r: 0x89, g: 0xB4, b: 0xFA };
+///     palette[PaletteIndex::MAGENTA.0 as usize] = RgbColor { r: 0xF5, g: 0xC2, b: 0xE7 };
+///     palette[PaletteIndex::CYAN.0 as usize]    = RgbColor { r: 0x94, g: 0xE2, b: 0xD5 };
+///     palette[PaletteIndex::WHITE.0 as usize]   = RgbColor { r: 0xBA, g: 0xC2, b: 0xDE };
+///     
+///     terminal.set_default_color_palette(Some(palette))?;
+///     Ok(())
+/// }
+/// ```
+///
 #[derive(Debug)]
 pub struct Terminal<'alloc: 'cb, 'cb> {
     pub(crate) inner: Object<'alloc, ffi::TerminalImpl>,
@@ -1000,6 +1120,8 @@ macro_rules! handlers {
     } => {
         impl<'alloc, 'cb> $crate::terminal::Terminal<'alloc, 'cb> {$(
             $(#[$fmeta])*
+            ///
+            /// See [#Effects](Terminal#effects) for more details.
             $vis fn $name(&mut self, f: impl $fnty<'alloc, 'cb>) -> $crate::error::Result<&mut Self> {
                 unsafe extern "C" fn callback(
                     t: $crate::ffi::Terminal,
@@ -1069,7 +1191,7 @@ macro_rules! handlers {
         )*}
         $(
             #[doc = concat!(
-                "Callback type for [`Terminal::",
+                "[Effect](Terminal#effects) callback type for [`Terminal::",
                 stringify!($name),
                 "`](Terminal::",
                 stringify!($name),
