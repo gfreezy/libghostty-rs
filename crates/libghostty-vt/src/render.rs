@@ -342,7 +342,7 @@ impl Snapshot<'_, '_> {
 
     fn set<T>(&self, tag: ffi::RenderStateOption::Type, value: &T) -> Result<()> {
         let result = unsafe {
-            ffi::ghostty_render_state_set(self.0.0.as_raw(), tag, std::ptr::from_ref(&value).cast())
+            ffi::ghostty_render_state_set(self.0.0.as_raw(), tag, std::ptr::from_ref(value).cast())
         };
         // Since we manually model every possible query, this should never fail.
         from_result(result)
@@ -524,7 +524,7 @@ impl RowIteration<'_, '_> {
             ffi::ghostty_render_state_row_set(
                 self.iter.0.as_raw(),
                 tag,
-                std::ptr::from_ref(&value).cast(),
+                std::ptr::from_ref(value).cast(),
             )
         };
         from_result(result)
@@ -777,4 +777,64 @@ pub enum CursorVisualStyle {
     Underline = ffi::RenderStateCursorVisualStyle::UNDERLINE,
     /// Hollow block cursor.
     BlockHollow = ffi::RenderStateCursorVisualStyle::BLOCK_HOLLOW,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::terminal::{Options, Terminal};
+
+    fn tiny_terminal() -> Terminal<'static, 'static> {
+        Terminal::new(Options {
+            cols: 8,
+            rows: 3,
+            max_scrollback: 100,
+        })
+        .expect("terminal should initialize")
+    }
+
+    /// After `Snapshot::set_dirty`, the next `update` must leave a valid
+    /// `dirty()` readout. A prior FFI bug passed `*const &T` instead of
+    /// `*const T` to `ghostty_render_state_set`, which corrupted the stored
+    /// dirty field and caused subsequent reads to fail enum decoding.
+    #[test]
+    fn set_dirty_then_update_preserves_valid_dirty_state() {
+        let mut terminal = tiny_terminal();
+        let mut state = RenderState::new().expect("render state should initialize");
+
+        for &value in &[Dirty::Clean, Dirty::Partial, Dirty::Full] {
+            let snapshot = state.update(&terminal).expect("first update should succeed");
+            snapshot.set_dirty(value).expect("set_dirty should succeed");
+
+            terminal.vt_write(b"x");
+            let snapshot = state
+                .update(&terminal)
+                .expect("update after set_dirty should succeed");
+
+            // The exact value depends on terminal state; what matters is that
+            // the round-trip decodes to a known variant rather than failing.
+            snapshot
+                .dirty()
+                .expect("dirty() must decode a valid enum after set_dirty + update");
+        }
+    }
+
+    /// Per-row `set_dirty` shares the same `from_ref` FFI shape; pin it too.
+    #[test]
+    fn row_set_dirty_does_not_corrupt_iteration() {
+        let mut terminal = tiny_terminal();
+        terminal.vt_write(b"abc");
+        let mut state = RenderState::new().expect("render state should initialize");
+        let _ = state.update(&terminal).expect("update should succeed");
+
+        let mut rows = RowIterator::new().expect("row iterator should initialize");
+        let snapshot = state.update(&terminal).expect("update should succeed");
+        let mut iter = rows.update(&snapshot).expect("row iterator update should succeed");
+
+        while let Some(row) = iter.next() {
+            row.set_dirty(false).expect("row set_dirty should succeed");
+            // Reading back must not return a corrupted value.
+            let _ = row.dirty().expect("row dirty() must decode after set_dirty");
+        }
+    }
 }
