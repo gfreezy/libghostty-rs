@@ -1,8 +1,24 @@
 //! Selecting terminal content between two endpoints.
-use std::{marker::PhantomData, ptr::NonNull};
+//!
+//! The start and end values are [`GridRef`] values. They are therefore
+//! untracked grid references and inherit the same lifetime rules: they are
+//! only safe to use until the next mutating operation on the terminal that
+//! produced them, including dropping the terminal. To keep a selection valid
+//! across terminal mutations, callers must maintain tracked grid references
+//! for the endpoints and reconstruct a [`Selection`] from fresh snapshots
+//! when needed.
+//!
+//! [Selection gestures](Gesture) provide a reusable state machine for turning
+//! UI pointer interactions into selection snapshots. A caller creates one
+//! [`Gesture`] per active gesture stream, reuses typed [`GestureEvent`] objects
+//! for synthetic press, drag, release, autoscroll tick, and deep-press events,
+//! and applies each event with [`Gesture::apply_event`]. The returned
+//! [`Selection`] is a snapshot; the embedder decides whether to render it,
+//! format/copy it, or install it as the terminal's active selection.
+use std::{marker::PhantomData, mem::MaybeUninit, ptr::NonNull};
 
 use crate::{
-    alloc::{Allocator, Bytes},
+    alloc::{Allocator, Bytes, Object},
     error::{Error, Result, from_optional_result, from_optional_result_with_len, from_result},
     ffi,
     fmt::Format,
@@ -572,6 +588,243 @@ impl Default for FormatOptions<'_, '_> {
     }
 }
 
+/// Opaque handle to state for interpreting terminal selection gestures.
+///
+/// The gesture owns only the state required to interpret pointer events.
+/// Calls that use a gesture are not concurrency-safe and must be serialized
+/// with terminal mutations.
+///
+/// # Memory management
+///
+/// When dropped, this type will temporarily **leak** a small amount of memory
+/// belonging to the internal [`TrackedGridRef`](crate::screen::TrackedGridRef)s.
+/// They will instead be reclaimed when the terminal they belong to is dropped.
+/// This memory can be preemptively reclaimed by calling the [`Gesture::reset`]
+/// method if needed.
+pub struct Gesture<'alloc> {
+    inner: Object<'alloc, ffi::SelectionGestureImpl>,
+}
+impl<'alloc> Gesture<'alloc> {
+    /// Create a new selection gesture instance.
+    pub fn new() -> Result<Self> {
+        // SAFETY: A NULL allocator is always valid
+        unsafe { Self::new_inner(std::ptr::null()) }
+    }
+
+    /// Create a new selection gesture instance with a custom allocator.
+    ///
+    /// See the [crate-level documentation](crate#memory-management-and-lifetimes)
+    /// regarding custom memory management and lifetimes.
+    pub fn new_with_alloc<'ctx: 'alloc>(alloc: &'alloc Allocator<'ctx>) -> Result<Self> {
+        // SAFETY: Borrow checking should forbid invalid allocators
+        unsafe { Self::new_inner(alloc.to_raw()) }
+    }
+
+    unsafe fn new_inner(alloc: *const ffi::Allocator) -> Result<Self> {
+        let mut raw: ffi::SelectionGesture = std::ptr::null_mut();
+        let result = unsafe { ffi::ghostty_selection_gesture_new(alloc, &raw mut raw) };
+        from_result(result)?;
+        Ok(Self {
+            inner: Object::new(raw)?,
+        })
+    }
+
+    fn get<T>(
+        &self,
+        terminal: &Terminal<'_, '_>,
+        tag: ffi::SelectionGestureData::Type,
+    ) -> Result<T> {
+        let mut value = MaybeUninit::<T>::zeroed();
+        let result = unsafe {
+            ffi::ghostty_selection_gesture_get(
+                self.inner.as_raw(),
+                terminal.inner.as_raw(),
+                tag,
+                value.as_mut_ptr().cast(),
+            )
+        };
+        from_result(result)?;
+        // SAFETY: Value should be initialized after successful call.
+        Ok(unsafe { value.assume_init() })
+    }
+
+    /// Apply a selection gesture event and return the resulting selection snapshot.
+    ///
+    /// This dispatches to the gesture operation matching the event's fixed type.
+    ///
+    /// For [`GestureEventType::Press`], the event must call
+    /// [`GestureEvent::set_grid_ref`] before calling this function. All other
+    /// press options use their initialized defaults when unset or cleared.
+    ///
+    /// For [`GestureEventType::Release`], only [`GestureEvent::set_grid_ref`]
+    /// can be called. It is optional; if unset or cleared, release records that
+    /// the pointer did not map to a valid cell. Release events update gesture
+    /// state but do not produce a selection, so this function returns `Ok(None)`
+    /// after applying them.
+    ///
+    /// For [`GestureEventType::Drag`], calling [`GestureEvent::set_grid_ref`]
+    /// and [`GestureEvent::set_geometry`] is required. Position, rectangle,
+    /// and word-boundary codepoints are optional and use initialized defaults
+    /// when unset or cleared.
+    ///
+    /// For [`GestureEventType::AutoscrollTick`], calling
+    /// [`GestureEvent::set_viewport`] and [`GestureEvent::set_geometry`] is
+    /// required. Position, rectangle, and word-boundary codepoints are optional
+    /// and use initialized defaults when unset or cleared.
+    ///
+    /// For [`GestureEventType::DeepPress`], only
+    /// [`GestureEvent::set_word_boundary_codepoints`] can be called.
+    /// It is optional and uses initialized defaults when unset or cleared.
+    ///
+    /// The returned selection is not installed as the terminal's current
+    /// selection. It is a snapshot with the same lifetime rules as [`Selection`].
+    pub fn apply_event<'t>(
+        &mut self,
+        terminal: &'t Terminal<'_, '_>,
+        event: &GestureEvent<'_>,
+    ) -> Result<Option<Selection<'t>>> {
+        let mut selection = ffi::sized!(ffi::Selection);
+
+        let result = unsafe {
+            ffi::ghostty_selection_gesture_event(
+                self.inner.as_raw(),
+                terminal.inner.as_raw(),
+                event.inner.as_raw(),
+                &raw mut selection,
+            )
+        };
+        let selection = from_optional_result(result, selection)?;
+
+        // SAFETY: We trust that libghostty will give us a
+        // selection object with correct lifetimes.
+        Ok(selection.map(|v| unsafe { Selection::from_raw(v) }))
+    }
+
+    /// Reset any active selection gesture state.
+    ///
+    /// This cancels the active click sequence and releases any tracked terminal
+    /// references owned by the gesture without dropping the gesture object.
+    pub fn reset<'t>(&mut self, terminal: &'t Terminal<'_, '_>) {
+        unsafe {
+            ffi::ghostty_selection_gesture_reset(self.inner.as_raw(), terminal.inner.as_raw());
+        }
+    }
+
+    /// Get the current click count. 0 means inactive.
+    pub fn click_count(self, terminal: &Terminal<'_, '_>) -> Result<u8> {
+        self.get(terminal, ffi::SelectionGestureData::CLICK_COUNT)
+    }
+    /// Whether the current/last left-click gesture has dragged.
+    pub fn dragged(self, terminal: &Terminal<'_, '_>) -> Result<bool> {
+        self.get(terminal, ffi::SelectionGestureData::DRAGGED)
+    }
+    /// Get the current autoscroll request.
+    pub fn autoscroll(self, terminal: &Terminal<'_, '_>) -> Result<Autoscroll> {
+        let v = self.get::<ffi::SelectionGestureAutoscroll::Type>(
+            terminal,
+            ffi::SelectionGestureData::AUTOSCROLL,
+        )?;
+        Autoscroll::try_from(v).map_err(|_| Error::InvalidValue)
+    }
+    /// Get the current gesture behavior.
+    pub fn behavior(self, terminal: &Terminal<'_, '_>) -> Result<Behavior> {
+        let v = self.get::<ffi::SelectionGestureBehavior::Type>(
+            terminal,
+            ffi::SelectionGestureData::BEHAVIOR,
+        )?;
+        Behavior::try_from(v).map_err(|_| Error::InvalidValue)
+    }
+    /// Get the current left-click anchor.
+    ///
+    /// Returns `None` if there is no valid active anchor.
+    pub fn anchor<'t>(self, terminal: &'t Terminal<'_, '_>) -> Result<Option<GridRef<'t>>> {
+        let mut grid_ref = ffi::sized!(ffi::GridRef);
+        let result = unsafe {
+            ffi::ghostty_selection_gesture_get(
+                self.inner.as_raw(),
+                terminal.inner.as_raw(),
+                ffi::SelectionGestureData::ANCHOR,
+                (&raw mut grid_ref).cast(),
+            )
+        };
+        let grid_ref = from_optional_result(result, grid_ref)?;
+        // SAFETY: We trust libghostty to return a GridRef
+        // with the correct lifetime requirements.
+        Ok(grid_ref.map(|v| unsafe { GridRef::from_raw(v) }))
+    }
+}
+impl Drop for Gesture<'_> {
+    fn drop(&mut self) {
+        // NOTE: We can't pass the terminal in here to eagerly reclaim memory
+        // taken up by the tracked grid refs, since that would require taking
+        // a reference to the terminal and hold it within the selection gesture
+        // struct and thereby prevent any mutation.
+        //
+        // However, leaking a bit of memory here is mostly fine since the
+        // memory will eventually be reclaimed by the terminal anyway,
+        // (which in the typical use case will be shortly after freeing
+        // the selection gesture), and memory-conscious embedders can simply
+        // call `reset` to manually reclaim memory if needed.
+        unsafe {
+            ffi::ghostty_selection_gesture_free(self.inner.as_raw(), std::ptr::null_mut());
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct GestureBaseEvent<'alloc> {
+    inner: Object<'alloc, ffi::SelectionGestureEventImpl>,
+}
+impl<'alloc> GestureBaseEvent<'alloc> {
+    unsafe fn new_inner(
+        alloc: *const ffi::Allocator,
+        ty: ffi::SelectionGestureEventType::Type,
+    ) -> Result<Self> {
+        let mut raw: ffi::SelectionGestureEvent = std::ptr::null_mut();
+        let result = unsafe { ffi::ghostty_selection_gesture_event_new(alloc, &raw mut raw, ty) };
+        from_result(result)?;
+        Ok(Self {
+            inner: Object::new(raw)?,
+        })
+    }
+}
+impl Drop for GestureBaseEvent<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::ghostty_selection_gesture_event_free(self.inner.as_raw());
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct GesturePressEvent<'alloc> {
+    pub base: GestureBaseEvent<'alloc>,
+}
+impl<'alloc> GesturePressEvent<'alloc> {
+    /// Create a new selection gesture press event instance.
+    pub fn new() -> Result<Self> {
+        // SAFETY: A NULL allocator is always valid
+        unsafe { Self::new_inner(std::ptr::null()) }
+    }
+
+    /// Create a new selection gesture press event instance with a custom allocator.
+    ///
+    /// See the [crate-level documentation](crate#memory-management-and-lifetimes)
+    /// regarding custom memory management and lifetimes.
+    pub fn new_with_alloc<'ctx: 'alloc>(alloc: &'alloc Allocator<'ctx>) -> Result<Self> {
+        // SAFETY: Borrow checking should forbid invalid allocators
+        unsafe { Self::new_inner(alloc.to_raw()) }
+    }
+
+    unsafe fn new_inner(alloc: *const ffi::Allocator) -> Result<Self> {
+        Ok(Self {
+            base: unsafe {
+                GestureBaseEvent::new_inner(alloc, ffi::SelectionGestureEventType::PRESS)?
+            },
+        })
+    }
+}
+
 /// Operation used to adjust a selection endpoint.
 ///
 /// Adjustment mutates the selection's logical end endpoint, not whichever
@@ -579,6 +832,7 @@ impl Default for FormatOptions<'_, '_> {
 /// for both forward and reversed selections.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum Adjustment {
     /// Move left to the previous non-empty cell, wrapping upward.
     Left = ffi::SelectionAdjust::LEFT,
@@ -613,6 +867,7 @@ pub enum Adjustment {
 /// top-left-to-bottom-right or bottom-right-to-top-left orderings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum Order {
     /// Start is before end in top-left to bottom-right order.
     Forward = ffi::SelectionOrder::FORWARD,
@@ -622,4 +877,32 @@ pub enum Order {
     MirroredForward = ffi::SelectionOrder::MIRRORED_FORWARD,
     /// Rectangular selection from bottom-left to top-right.
     MirroredReverse = ffi::SelectionOrder::MIRRORED_REVERSE,
+}
+
+/// Current autoscroll direction for an active selection drag gesture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum Autoscroll {
+    /// No selection autoscroll is requested.
+    None,
+    /// Selection dragging should autoscroll the viewport upward.
+    Up,
+    /// Selection dragging should autoscroll the viewport downward.
+    Down,
+}
+
+/// Selection behavior chosen for a gesture's click sequence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum Behavior {
+    /// Cell-granular drag selection.
+    Cell,
+    /// Word selection on press and word-granular drag selection.
+    Word,
+    /// Line selection on press and line-granular drag selection.
+    Line,
+    /// Semantic command output selection on press and drag.
+    Output,
 }
