@@ -34,8 +34,10 @@ jobs:
           - target: aarch64-apple-darwin
             runner: macos-14
             ext: a
+          # Cross-compiled from the arm runner (Zig cross-builds the archive)
+          # to avoid depending on scarce Intel macOS runners.
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-14
             ext: a
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
