@@ -40,5 +40,19 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Build libghostty-vt
-        run: cargo build -p libghostty-vt --target ${{ matrix.target }}
+      # Build the native static library from source (Zig), then point the
+      # vendored crate at it so libghostty-vt links the locally built archive
+      # instead of downloading a prebuilt one.
+      - name: Build libghostty-vt-sys (native lib)
+        run: cargo build -p libghostty-vt-sys --target ${{ matrix.target }}
+
+      - name: Build libghostty-vt via prebuilt dir
+        shell: bash
+        run: |
+          set -euo pipefail
+          libdir=$(dirname "$(find "target/${{ matrix.target }}/debug/build" \
+            -path '*ghostty-install/lib/*' \
+            \( -name 'ghostty-vt-static.lib' -o -name 'ghostty-vt.lib' \) | head -1)")
+          test -n "$libdir" || { echo "static lib not found"; exit 1; }
+          export GHOSTTY_VT_PREBUILT_DIR="$libdir"
+          cargo build -p libghostty-vt --target ${{ matrix.target }}

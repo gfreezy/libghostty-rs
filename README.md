@@ -55,10 +55,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Building
 
-Requires [Zig](https://ziglang.org/) 0.15.x on PATH. By default, the ghostty
-source is fetched automatically at build time from the pinned commit in
-`build.rs`. Set `GHOSTTY_SOURCE_DIR` to make the build use a local Ghostty
-checkout instead. Package managers that need network-free builds can also set
+**No Zig toolchain required by default.** `libghostty-vt` depends on
+[`libghostty-vt-sys-vendored`](crates/libghostty-vt-sys-vendored), which at build
+time **downloads** a prebuilt `libghostty-vt` static library (and the matching
+`bindings.rs`) for your target from a pinned GitHub release, verifies it against
+a checked-in `SHA256SUMS`, and caches it. The dependency is aliased to
+`libghostty-vt-sys`, so `use libghostty_vt_sys` paths are unchanged.
+
+If a prebuilt artifact cannot be obtained (unsupported target, no network, or a
+target with no published artifact) the build **fails with a clear error** — there
+is no Zig source-build fallback. Two escape hatches:
+
+- **Use a locally built library** — set `GHOSTTY_VT_PREBUILT_DIR` to a directory
+  containing the native library (in it or a `lib/` subdir) and optionally a
+  `bindings.rs`. To produce one with Zig:
+
+  ```sh
+  cargo build -p libghostty-vt-sys   # builds libghostty-vt.a via Zig
+  export GHOSTTY_VT_PREBUILT_DIR=$(dirname "$(find target -path '*ghostty-install/lib/libghostty-vt.a')")
+  cargo build -p libghostty-vt
+  ```
+
+- **Build from source** — depend on
+  [`libghostty-vt-sys`](crates/libghostty-vt-sys) directly. It builds the native
+  library from Ghostty sources with [Zig](https://ziglang.org/) 0.15.x and is the
+  crate the release artifacts are produced from.
+
+### Building libghostty-vt-sys from source (Zig)
+
+`libghostty-vt-sys` requires Zig 0.15.x on PATH. By default the ghostty source is
+fetched automatically at build time from the pinned commit in `build.rs`. Set
+`GHOSTTY_SOURCE_DIR` to make the build use a local Ghostty checkout instead.
+Package managers that need network-free builds can also set
 `GHOSTTY_ZIG_SYSTEM_DIR` to a pre-fetched Zig package directory; this is passed
 to `zig build --system` so Zig does not download package dependencies during
 the Cargo build script.
@@ -76,15 +104,31 @@ do not guarantee compatibility with arbitrary installed C API revisions. An
 explicit `GHOSTTY_SOURCE_DIR` always wins.
 
 Nix builds in this repository prefetch the pinned Ghostty source and Ghostty's
-Zig package dependencies up front, then set `GHOSTTY_SOURCE_DIR` and
-`GHOSTTY_ZIG_SYSTEM_DIR` for the Cargo build. Downstream Nix packaging should
-use the same contract rather than adding `git` or allowing network access in
+Zig package dependencies up front. The flake builds the static library from
+source in a separate derivation and sets `GHOSTTY_VT_PREBUILT_DIR` (so the
+vendored crate links it instead of downloading), plus `GHOSTTY_SOURCE_DIR` and
+`GHOSTTY_ZIG_SYSTEM_DIR` for the `libghostty-vt-sys` member. Downstream Nix
+packaging should use the same contract rather than allowing network access in
 the sandbox.
 
-By default, `libghostty-vt` and `libghostty-vt-sys` link `libghostty-vt.a`.
-This statically links the Ghostty VT archive, but the final binary may still
-depend on platform runtime libraries. To link the shared library instead,
-enable `libghostty-vt/link-dynamic`.
+By default the native library is linked statically (`libghostty-vt.a`). This
+statically links the Ghostty VT archive, but the final binary may still depend
+on platform runtime libraries. To link the shared library instead, enable
+`libghostty-vt/link-dynamic` (requires a published dynamic prebuilt artifact, or
+a `GHOSTTY_VT_PREBUILT_DIR` containing the shared library).
+
+### Releasing prebuilt artifacts
+
+`.github/workflows/release.yml` builds the static library for every supported
+target plus `bindings.rs`, and publishes them to a `vt-prebuilt-v*` GitHub
+release with a `SHA256SUMS` manifest. To cut a release:
+
+1. Bump `PREBUILT_TAG` in `crates/libghostty-vt-sys-vendored/build.rs` to the new
+   tag and commit it.
+2. Push the matching tag (e.g. `vt-prebuilt-v0.1.1`). The workflow builds and
+   uploads all artifacts.
+3. Merge the auto-opened PR that syncs `SHA256SUMS` and the checked-in
+   `bindings.rs` fallbacks, so downloads verify against the published hashes.
 
 ```sh
 nix develop

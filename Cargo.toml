@@ -2,6 +2,7 @@
 members = [
   "crates/libghostty-vt",
   "crates/libghostty-vt-sys",
+  "crates/libghostty-vt-sys-vendored",
   "example/grid_ref_tracked_rs",
   "example/ghostling_rs",
 ]
@@ -17,3 +18,4 @@ version = "0.1.1"
 [workspace.dependencies]
 libghostty-vt = { path = "crates/libghostty-vt", version = "0.1.1" }
 libghostty-vt-sys = { path = "crates/libghostty-vt-sys", version = "0.1.1" }
+libghostty-vt-sys-vendored = { path = "crates/libghostty-vt-sys-vendored", version = "0.1.1" }

@@ -1,0 +1,34 @@
+[package]
+name = "libghostty-vt-sys-vendored"
+description = "Prebuilt FFI bindings for libghostty-vt, downloaded from GitHub releases (no Zig toolchain required)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# Distinct from libghostty-vt-sys's `links = "ghostty-vt"` so both can coexist
+# as workspace members (cargo forbids duplicate `links` in one resolve graph).
+# This token only namespaces build-script metadata; the actual link directive
+# is `rustc-link-lib=...=ghostty-vt`, emitted by build.rs regardless.
+links = "ghostty-vt-vendored"
+build = "build.rs"
+
+[lib]
+doctest = false
+
+[features]
+default = []
+# Link the shared library instead of the static archive. Requires a dynamic
+# prebuilt artifact for the target to be available on the release.
+link-dynamic = []
+# No-op feature kept for parity with libghostty-vt-sys so that downstream
+# feature forwarding (libghostty-vt/kitty-graphics) compiles. It does not
+# affect the native artifact.
+kitty-graphics = []
+
+[build-dependencies]
+ureq = "2"
+sha2 = "0.10"
+
+[package.metadata.docs.rs]
+all-features = true

@@ -65,6 +65,46 @@
           zig_0_15 = zigPkg;
         };
 
+        # Prebuilt libghostty-vt static library, built from Ghostty sources with
+        # Zig (mirroring crates/libghostty-vt-sys/build.rs). The sandboxed Cargo
+        # build cannot download from GitHub, so libghostty-vt-sys-vendored is
+        # pointed at this via GHOSTTY_VT_PREBUILT_DIR. Only the `.a` is needed —
+        # vendored falls back to its checked-in bindings.rs when the directory
+        # has none.
+        ghosttyVtLib = pkgs.stdenv.mkDerivation ({
+          name = "libghostty-vt-${builtins.substring 0 7 ghosttyCommit}";
+          src = ghosttySrc;
+          dontConfigure = true;
+          nativeBuildInputs =
+            [zigPkg]
+            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+              pkgs.cctools
+              pkgs.xcbuild
+            ];
+          buildInputs = pkgs.lib.optionals pkgs.stdenv.isDarwin [
+            pkgs.apple-sdk
+            pkgs.libiconv
+          ];
+          buildPhase = ''
+            runHook preBuild
+            zig build \
+              -Demit-lib-vt \
+              -Doptimize=ReleaseFast \
+              -Demit-xcframework=false \
+              -Dapp-runtime=none \
+              --prefix "$out" \
+              --cache-dir "$TMPDIR/zig-cache" \
+              --system ${ghosttyZigDeps} \
+              --global-cache-dir "$TMPDIR/zig-global"
+            runHook postBuild
+          '';
+          dontInstall = true;
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+          DEVELOPER_DIR = "${pkgs.apple-sdk}";
+          SDKROOT = "${pkgs.apple-sdk.sdkroot}";
+        });
+
         src = pkgs.lib.fileset.toSource {
           root = unfilteredRoot;
           fileset = pkgs.lib.fileset.unions [
@@ -88,6 +128,9 @@
             strictDeps = true;
             GHOSTTY_SOURCE_DIR = "${ghosttySrc}";
             GHOSTTY_ZIG_SYSTEM_DIR = "${ghosttyZigDeps}";
+            # libghostty-vt-sys-vendored cannot download in the sandbox; point
+            # it at the locally built static library instead.
+            GHOSTTY_VT_PREBUILT_DIR = "${ghosttyVtLib}";
 
             nativeBuildInputs = [
               pkgs.pkg-config
@@ -150,6 +193,7 @@
           shellHook = ''
             export GHOSTTY_SOURCE_DIR=${ghosttySrc}
             export GHOSTTY_ZIG_SYSTEM_DIR=${ghosttyZigDeps}
+            export GHOSTTY_VT_PREBUILT_DIR=${ghosttyVtLib}
             export LIBCLANG_PATH=${pkgs.libclang.lib}/lib
           '' + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
             # Unset Nix Darwin SDK env vars and remove the xcbuild
