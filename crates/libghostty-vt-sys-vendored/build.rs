@@ -16,6 +16,7 @@
 //! fallback. The error message points users at `GHOSTTY_VT_PREBUILT_DIR` or the
 //! source-building `libghostty-vt-sys` crate.
 
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -23,17 +24,16 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-/// Release tag the prebuilt artifacts are pulled from. Bump together with the
-/// checked-in `SHA256SUMS` and `src/bindings.rs` whenever a new release is cut.
-const PREBUILT_TAG: &str = "vt-prebuilt-v0.1.1";
-
 /// Base URL for GitHub release downloads. Must point at the repository that the
 /// `release.yml` workflow publishes the `vt-prebuilt-v*` releases to.
 const RELEASE_BASE: &str = "https://github.com/gfreezy/libghostty-rs/releases/download";
 
-/// `sha256sum`-format manifest of expected artifact hashes, kept in sync with
-/// the release by the release workflow.
-const SHA256SUMS: &str = include_str!("SHA256SUMS");
+/// Release tag the prebuilt artifacts are pulled from, derived from the crate
+/// version so a version bump is the only edit needed. The release workflow is
+/// triggered by pushing a tag of exactly this name.
+fn prebuilt_tag() -> String {
+    format!("vt-prebuilt-v{}", env!("CARGO_PKG_VERSION"))
+}
 
 #[derive(Clone, Copy)]
 enum LinkMode {
@@ -64,7 +64,6 @@ fn main() {
     println!("cargo:rerun-if-env-changed=DOCS_RS");
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=SHA256SUMS");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set"));
 
@@ -133,38 +132,49 @@ fn use_local_dir(dir: &Path, out_dir: &Path, target: &str, link_mode: LinkMode) 
     }
 }
 
-/// Download the prebuilt artifact + bindings from the pinned release, verify
-/// their checksums, cache them, and emit the link directives.
+/// Download the prebuilt artifact + bindings from the release, verify their
+/// checksums against the release's own `SHA256SUMS`, cache them, and emit the
+/// link directives.
 fn download_and_link(out_dir: &Path, target: &str, link_mode: LinkMode) {
-    let lib_asset = asset_name(target, link_mode);
-    let cache = cache_dir();
+    let tag = prebuilt_tag();
+    let cache = cache_dir(&tag);
 
-    // Library.
-    let cached_lib = fetch_to_cache(&cache, &lib_asset);
+    // The release's own SHA256SUMS is the integrity source of truth. Fetch it
+    // (small) and verify every artifact against it. Release tags are immutable,
+    // so this is safe; for fully offline builds use GHOSTTY_VT_PREBUILT_DIR.
+    let sums_url = format!("{RELEASE_BASE}/{tag}/SHA256SUMS");
+    let sums = parse_sha256sums(&String::from_utf8_lossy(&http_get(&sums_url)));
+
+    let lib_asset = asset_name(target, link_mode);
+    let cached_lib = fetch_to_cache(&cache, &tag, &lib_asset, &sums);
     install_library(&cached_lib, out_dir, target, link_mode);
 
-    // Bindings (target independent).
-    let cached_bindings = fetch_to_cache(&cache, "bindings.rs");
+    let cached_bindings = fetch_to_cache(&cache, &tag, "bindings.rs", &sums);
     fs::copy(&cached_bindings, out_dir.join("bindings.rs"))
         .unwrap_or_else(|e| panic!("failed to copy cached bindings -> OUT_DIR: {e}"));
 }
 
-/// Ensure `name` exists in the cache dir with a verified checksum, downloading
+/// Ensure `name` exists in the cache dir, verified against `sums`, downloading
 /// it from the release if necessary. Returns the cached file path.
-fn fetch_to_cache(cache: &Path, name: &str) -> PathBuf {
-    let expected = expected_sha256(name);
+fn fetch_to_cache(cache: &Path, tag: &str, name: &str, sums: &HashMap<String, String>) -> PathBuf {
+    let expected = sums.get(name).unwrap_or_else(|| {
+        panic!(
+            "release {tag} SHA256SUMS has no entry for '{name}'. \
+             The release may be missing this artifact."
+        )
+    });
     let dest = cache.join(name);
 
-    if dest.exists() && file_sha256(&dest) == expected {
+    if dest.exists() && &file_sha256(&dest) == expected {
         return dest;
     }
 
-    let url = format!("{RELEASE_BASE}/{PREBUILT_TAG}/{name}");
+    let url = format!("{RELEASE_BASE}/{tag}/{name}");
     let bytes = http_get(&url);
 
     let actual = bytes_sha256(&bytes);
     assert!(
-        actual == expected,
+        &actual == expected,
         "checksum mismatch for {name}\n  expected {expected}\n  actual   {actual}\n  from {url}"
     );
 
@@ -321,38 +331,32 @@ fn assert_supported(target: &str) {
 
 /// Cache directory for downloaded artifacts: `$GHOSTTY_VT_PREBUILT_CACHE` or
 /// `$CARGO_HOME/libghostty-vt-prebuilt/<tag>`.
-fn cache_dir() -> PathBuf {
+fn cache_dir(tag: &str) -> PathBuf {
     if let Some(dir) = env::var_os("GHOSTTY_VT_PREBUILT_CACHE") {
-        return PathBuf::from(dir).join(PREBUILT_TAG);
+        return PathBuf::from(dir).join(tag);
     }
     let base = env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("libghostty-vt-prebuilt").join(PREBUILT_TAG)
+    base.join("libghostty-vt-prebuilt").join(tag)
 }
 
-/// Look up the expected sha256 (hex) for `name` in the checked-in manifest.
-fn expected_sha256(name: &str) -> String {
-    for line in SHA256SUMS.lines() {
+/// Parse a `sha256sum`-format manifest into a `filename -> hex` map.
+fn parse_sha256sums(text: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         // `sha256sum` format: "<hex>  <filename>" (two spaces, or one + '*').
         let mut parts = line.split_whitespace();
-        let (Some(hex), Some(file)) = (parts.next(), parts.next()) else {
-            continue;
-        };
-        let file = file.trim_start_matches('*');
-        if file == name {
-            return hex.to_lowercase();
+        if let (Some(hex), Some(file)) = (parts.next(), parts.next()) {
+            map.insert(file.trim_start_matches('*').to_owned(), hex.to_lowercase());
         }
     }
-    panic!(
-        "no checksum pinned for '{name}' in SHA256SUMS (tag {PREBUILT_TAG}).\n\
-         The release may be missing this artifact, or SHA256SUMS is out of date."
-    );
+    map
 }
 
 fn http_get(url: &str) -> Vec<u8> {

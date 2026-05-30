@@ -117,18 +117,28 @@ on platform runtime libraries. To link the shared library instead, enable
 `libghostty-vt/link-dynamic` (requires a published dynamic prebuilt artifact, or
 a `GHOSTTY_VT_PREBUILT_DIR` containing the shared library).
 
-### Releasing prebuilt artifacts
+### Releasing a new version
 
-`.github/workflows/release.yml` builds the static library for every supported
-target plus `bindings.rs`, and publishes them to a `vt-prebuilt-v*` GitHub
-release with a `SHA256SUMS` manifest. To cut a release:
+Releasing is one command:
 
-1. Bump `PREBUILT_TAG` in `crates/libghostty-vt-sys-vendored/build.rs` to the new
-   tag and commit it.
-2. Push the matching tag (e.g. `vt-prebuilt-v0.1.1`). The workflow builds and
-   uploads all artifacts.
-3. Merge the auto-opened PR that syncs `SHA256SUMS` and the checked-in
-   `bindings.rs` fallbacks, so downloads verify against the published hashes.
+```sh
+./release.sh 0.2.0
+```
+
+It bumps the version, commits, pushes, and pushes the matching
+`vt-prebuilt-v0.2.0` tag. That tag triggers `.github/workflows/release.yml`,
+which builds the static library for every supported target plus `bindings.rs`
+and publishes them to the release with a `SHA256SUMS` manifest.
+
+The vendored crate derives its tag from its own version
+(`vt-prebuilt-v<version>`) and verifies downloads against the release's own
+`SHA256SUMS`, so **nothing needs to be committed back** after a release.
+
+When bumping the pinned Ghostty version (`GHOSTTY_COMMIT` in
+`crates/libghostty-vt-sys/build.rs`), also update `ghosttyCommit` + its hash in
+`flake.nix`, and regenerate the docs.rs fallback bindings
+(`cargo run -p libghostty-vt-sys --features bindgen-tool --bin gen-bindings`,
+then copy `crates/libghostty-vt-sys/src/bindings.rs` to the vendored crate).
 
 ```sh
 nix develop

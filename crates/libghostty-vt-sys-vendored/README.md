@@ -19,8 +19,8 @@ The build script (`build.rs`) picks a source in this order:
    `<dir>/lib`, and `bindings.rs` from `<dir>` if present (otherwise the
    checked-in fallback). This is the offline / Nix / from-source escape hatch.
 3. **Download** (default): fetches the artifact for the current target and
-   `bindings.rs` from the pinned GitHub release (`vt-prebuilt-*` tag), verifies
-   them against the checked-in `SHA256SUMS`, and caches them.
+   `bindings.rs` from the GitHub release tagged `vt-prebuilt-v<crate-version>`,
+   verifies them against the release's own `SHA256SUMS`, and caches them.
 
 If none of these can produce a library — unsupported target, download failure,
 or a target with no published artifact — the build **fails with a clear error**.
@@ -44,6 +44,8 @@ There is intentionally no Zig source-build fallback. To build from source, set
 
 ## Maintainer note
 
-`src/bindings.rs` and `SHA256SUMS` are generated and updated by
-`.github/workflows/release.yml`. Do not edit them by hand. When cutting a
-release, bump `PREBUILT_TAG` in `build.rs` to match.
+The download tag is derived from the crate version (`vt-prebuilt-v<version>`),
+so cutting a release is just `./release.sh <version>` at the repo root — no tag
+constant to bump and nothing to commit back. `src/bindings.rs` is only the
+docs.rs / offline fallback; regenerate it when the pinned Ghostty version
+changes.

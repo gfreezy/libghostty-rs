@@ -1,6 +1,0 @@
-# sha256 checksums for prebuilt libghostty-vt artifacts.
-# Regenerated and committed by .github/workflows/release.yml when a release is
-# cut. Format matches `sha256sum`: "<hex>  <filename>".
-#
-# Until the first `vt-prebuilt-*` release exists this file is empty, so the
-# download path will hard-error; use GHOSTTY_VT_PREBUILT_DIR for local builds.

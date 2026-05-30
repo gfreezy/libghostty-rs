@@ -1,17 +1,14 @@
 name: Release prebuilt artifacts
 
 # Builds the libghostty-vt static library for every supported target plus the
-# target-independent bindings.rs, then publishes them to a GitHub release that
-# libghostty-vt-sys-vendored downloads from.
+# target-independent bindings.rs, then publishes them (with a SHA256SUMS
+# manifest) to a GitHub release that libghostty-vt-sys-vendored downloads from.
 #
-# Trigger by pushing a tag like `vt-prebuilt-v0.1.1` (must match PREBUILT_TAG in
-# crates/libghostty-vt-sys-vendored/build.rs), or run manually.
-#
-# Maintainer flow:
-#   1. Bump PREBUILT_TAG in build.rs to the new tag, commit to master.
-#   2. Push the tag. This workflow builds + uploads artifacts and SHA256SUMS.
-#   3. Commit the updated SHA256SUMS + src/bindings.rs (downloaded from the run
-#      artifacts, or via the auto-sync job below) so downloads verify.
+# The vendored crate derives the tag from its version (vt-prebuilt-v<version>)
+# and verifies downloads against the release's own SHA256SUMS, so nothing is
+# committed back to the repo. Releasing is one step: `./release.sh <version>`
+# (bumps the version, commits, pushes, and pushes the matching tag), or push a
+# `vt-prebuilt-v*` tag manually.
 
 on:
   push:
@@ -188,26 +185,6 @@ jobs:
               --title "$tag" \
               --notes "Prebuilt libghostty-vt artifacts. Consumed by libghostty-vt-sys-vendored."
           fi
-
-      - name: Sync SHA256SUMS + fallback bindings into the repo
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          cp release/SHA256SUMS crates/libghostty-vt-sys-vendored/SHA256SUMS
-          cp release/bindings.rs crates/libghostty-vt-sys/src/bindings.rs
-          cp release/bindings.rs crates/libghostty-vt-sys-vendored/src/bindings.rs
-          if git diff --quiet; then
-            echo "No changes to sync."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          branch="chore/sync-prebuilt-${{ steps.tag.outputs.tag }}"
-          git checkout -b "$branch"
-          git add crates/libghostty-vt-sys-vendored/SHA256SUMS \
-                  crates/libghostty-vt-sys/src/bindings.rs \
-                  crates/libghostty-vt-sys-vendored/src/bindings.rs
-          git commit -m "chore: sync SHA256SUMS + bindings for ${{ steps.tag.outputs.tag }}"
-          git push -u origin "$branch"
-          gh pr create --fill --base master --head "$branch" || true
+          # SHA256SUMS is published as a release asset; the vendored crate's
+          # build.rs downloads it to verify the artifacts. Nothing is committed
+          # back to the repository.
